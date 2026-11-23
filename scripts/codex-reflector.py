@@ -561,13 +561,84 @@ def _is_loopback_host(host: str | None) -> bool:
         return False
 
 
-def _judge_url() -> str:
-    base = os.environ.get("TYPESAFE_BASE_URL", "").strip() or "https://api.typesafe.ai"
-    parts = urllib.parse.urlsplit(base)
-    loopback_http = parts.scheme == "http" and _is_loopback_host(parts.hostname)
+_JUDGE_OFFICIAL_BASE_URL = "https://api.typesafe.ai"
+_JUDGE_HOST_PATTERN = re.compile(r"[a-z0-9_-]+(?:\.[a-z0-9_-]+)*")
+
+
+class _JudgeUrlRefused(ValueError):
+    pass
+
+
+def _account_judge_allowlist() -> Path | None:
+    try:
+        import pwd
+
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, KeyError):
+        return None
+    return Path(home) / ".config" / "codex-reflector" / "allowed-judge-urls"
+
+
+_JUDGE_ALLOWLIST_PATH = _account_judge_allowlist()
+
+
+def _is_judge_host(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return _JUDGE_HOST_PATTERN.fullmatch(host) is not None
+    return True
+
+
+def _judge_endpoint(base: str) -> tuple[tuple[str, str, int], str]:
+    try:
+        parts = urllib.parse.urlsplit(base.strip())
+        port = parts.port
+    except ValueError:
+        raise _JudgeUrlRefused("TYPESAFE_BASE_URL is not a plain base URL") from None
+    host = (parts.hostname or "").rstrip(".")
+    if "@" in parts.netloc or parts.query or parts.fragment or not _is_judge_host(host):
+        raise _JudgeUrlRefused("TYPESAFE_BASE_URL is not a plain base URL")
+    loopback_http = parts.scheme == "http" and _is_loopback_host(host)
     if parts.scheme != "https" and not loopback_http:
-        raise ValueError(f"TYPESAFE_BASE_URL must be https or a loopback http host: {base}")
-    return base.rstrip("/") + "/v1/systemone"
+        raise _JudgeUrlRefused("TYPESAFE_BASE_URL must be https or loopback http")
+    default_port = 443 if parts.scheme == "https" else 80
+    origin = (parts.scheme, host, default_port if port is None else port)
+    netloc = f"[{host}]" if ":" in host else host
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    path = parts.path.rstrip("/") + "/v1/systemone"
+    return origin, urllib.parse.urlunsplit((parts.scheme, netloc, path, "", ""))
+
+
+def _allowed_judge_origins() -> set[tuple[str, str, int]]:
+    if _JUDGE_ALLOWLIST_PATH is None:
+        return set()
+    try:
+        lines = _JUDGE_ALLOWLIST_PATH.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return set()
+    origins: set[tuple[str, str, int]] = set()
+    for number, line in enumerate(lines, 1):
+        entry = line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        try:
+            origins.add(_judge_endpoint(entry)[0])
+        except _JudgeUrlRefused:
+            debug(f"judge allowlist line {number} skipped")
+    return origins
+
+
+def _judge_url() -> str:
+    base = os.environ.get("TYPESAFE_BASE_URL", "").strip() or _JUDGE_OFFICIAL_BASE_URL
+    origin, url = _judge_endpoint(base)
+    official, _ = _judge_endpoint(_JUDGE_OFFICIAL_BASE_URL)
+    if origin != official and origin not in _allowed_judge_origins():
+        raise _JudgeUrlRefused(
+            "TYPESAFE_BASE_URL host is not in ~/.config/codex-reflector/allowed-judge-urls"
+        )
+    return url
 
 
 def _judge_model() -> str:
@@ -859,9 +930,8 @@ def invoke_judge(
         return None, "TYPESAFE_API_KEY is not set"
     try:
         url = _judge_url()
-    except ValueError as err:
-        debug(f"judge url refused: {err}")
-        return None, f"judge request failed: {type(err).__name__}"
+    except _JudgeUrlRefused as err:
+        return None, str(err)
     request = _judge_request(url, key, state, questions)
     review = review or _Review()
     return _judge_attempts(_judge_opener(url, review), request, questions, review)
@@ -1306,6 +1376,24 @@ def _restore_env(name: str, value: str | None) -> None:
         os.environ[name] = value
 
 
+_SELFTEST_ALLOWLIST: Path | None = None
+
+
+def _selftest_allowlist() -> Path:
+    if _SELFTEST_ALLOWLIST is None:
+        raise RuntimeError("judge test servers run only inside run_self_test")
+    return _SELFTEST_ALLOWLIST
+
+
+def _allow_test_judge(base_url: str) -> None:
+    with _selftest_allowlist().open("a", encoding="utf-8") as allowlist:
+        allowlist.write(base_url + "\n")
+
+
+def _unlist_test_judges() -> None:
+    _selftest_allowlist().write_text("", encoding="utf-8")
+
+
 _ORACLE_QUESTION_KEYS = frozenset({"type", "instructions", "criteria"})
 
 
@@ -1480,6 +1568,7 @@ class _RecordedJudgeServer:
     def __enter__(self) -> Self:
         self.httpd = _recorded_judge_server(self)
         self.base_url = f"http://127.0.0.1:{self.httpd.server_port}"
+        _allow_test_judge(self.base_url)
         self.serving_thread = threading.Thread(target=self.httpd.serve_forever)
         self.serving_thread.start()
         return self
@@ -2416,7 +2505,7 @@ def _selftest_transport_wire(check: Callable[[str, object], None]) -> None:
             correctness = answers["correctness"]
             assert correctness["type"] == "score"
             check(
-                "loopback http base is allowed and answers come back",
+                "allowlisted loopback http base is allowed and answers come back",
                 (answers is not None, model) == (True, "jev-1.14.0"),
             )
             check(
@@ -2528,7 +2617,7 @@ def _selftest_transport_wire(check: Callable[[str, object], None]) -> None:
         answers, cause = invoke_judge(state, questions)
         check(
             "non-loopback http base is refused before any request",
-            (answers, cause) == (None, "judge request failed: ValueError"),
+            (answers, cause) == (None, "TYPESAFE_BASE_URL must be https or loopback http"),
         )
         os.environ.pop("TYPESAFE_API_KEY", None)
         answers, cause = invoke_judge(state, questions)
@@ -3448,6 +3537,7 @@ def _selftest_transport_bad_key(check: Callable[[str, object], None]) -> None:
     prev_base = os.environ.get("TYPESAFE_BASE_URL")
     prev_debug = os.environ.get("CODEX_REFLECTOR_DEBUG")
     os.environ["TYPESAFE_API_KEY"] = "sk-abc\r\nX: y"
+    _allow_test_judge("http://127.0.0.1:9")
     os.environ["TYPESAFE_BASE_URL"] = "http://127.0.0.1:9"
     os.environ["CODEX_REFLECTOR_DEBUG"] = "1"
     try:
@@ -3500,6 +3590,108 @@ def _selftest_transport_loopback_proxy(check: Callable[[str, object], None]) -> 
         _restore_env("TYPESAFE_BASE_URL", prev_base)
 
 
+def _selftest_judge_base_url(check: Callable[[str, object], None]) -> None:
+    print("\n=== Judge Base URL Allowlist ===")
+    import subprocess
+
+    questions = build_questions("plan")
+    state = {"subject": "Add a retry with backoff to the upload loop."}
+    secret = "sk-hostile-secret"
+    prev_key = os.environ.get("TYPESAFE_API_KEY")
+    prev_base = os.environ.get("TYPESAFE_BASE_URL")
+    os.environ["TYPESAFE_API_KEY"] = "test-key-1234"
+
+    def outcome(base: str | None) -> str:
+        _restore_env("TYPESAFE_BASE_URL", base)
+        try:
+            return _judge_url()
+        except ValueError as err:
+            return f"refused: {err}"
+
+    official = "https://api.typesafe.ai/v1/systemone"
+    hostile = (
+        "https://attacker.example",
+        "https://api.typesafe.ai.attacker.example",
+        "https://attacker.example/api.typesafe.ai",
+        "https://api.typesafe.ai@attacker.example",
+        "https://api.typesafe.ai\\@attacker.example",
+        f"https://{secret}@api.typesafe.ai",
+        f"https://api.typesafe.ai:{secret}",
+        f"https://api.typesafe.ai/?{secret}",
+        f"https://api.typesafe.ai/#{secret}",
+        "https://api.typesafe.ai:8443",
+        "https://\uff41pi.typesafe.ai",
+        "http://api.typesafe.ai",
+    )
+    try:
+        check("unset base is the official judge", outcome(None) == official)
+        check(
+            "official host in another spelling is the official judge",
+            outcome(" HTTPS://API.TypeSafe.ai./ ") == official,
+        )
+        for base in hostile:
+            refusal = outcome(base)
+            check(
+                f"{ascii(base)} is refused without echoing it",
+                refusal.startswith("refused: TYPESAFE_BASE_URL ")
+                and secret not in refusal
+                and "attacker" not in refusal,
+            )
+        _allow_test_judge("https://judge.internal.example")
+        check(
+            "allowlisted host is the judge with its base path",
+            outcome("https://judge.internal.example/base/")
+            == "https://judge.internal.example/base/v1/systemone",
+        )
+        check(
+            "allowlisted host does not admit a longer host",
+            outcome("https://judge.internal.example.attacker.example").startswith("refused: "),
+        )
+        ok_reply = _scripted_replies([(200, _answers_reply({}, "jev-1.14.0"), {})])
+        with _RecordedJudgeServer(ok_reply) as judge:
+            _unlist_test_judges()
+            os.environ["TYPESAFE_BASE_URL"] = judge.base_url
+            answers, cause = invoke_judge(state, questions)
+            check(
+                "unlisted loopback judge receives no request and no key",
+                (answers, cause, judge.records)
+                == (
+                    None,
+                    "TYPESAFE_BASE_URL host is not in ~/.config/codex-reflector/allowed-judge-urls",
+                    [],
+                ),
+            )
+        with tempfile.TemporaryDirectory() as project, _RecordedJudgeServer(ok_reply) as judge:
+            _unlist_test_judges()
+            project_list = Path(project, ".config", "codex-reflector", "allowed-judge-urls")
+            project_list.parent.mkdir(parents=True)
+            project_list.write_text(judge.base_url + "\n", encoding="utf-8")
+            env = dict(
+                os.environ,
+                HOME=project,
+                XDG_CONFIG_HOME=str(Path(project, ".config")),
+                TYPESAFE_BASE_URL=judge.base_url,
+                CODEX_REFLECTOR_ENABLED="1",
+            )
+            hook = subprocess.run(
+                [sys.executable, os.path.abspath(__file__)],
+                input=json.dumps(dict(_write_change_hook("x = 1\n"), cwd=project)),
+                env=env,
+                cwd=project,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            check(
+                "project HOME and XDG_CONFIG_HOME cannot allowlist a judge",
+                (hook.returncode, judge.records, "allowed-judge-urls" in hook.stdout)
+                == (0, [], True),
+            )
+    finally:
+        _restore_env("TYPESAFE_API_KEY", prev_key)
+        _restore_env("TYPESAFE_BASE_URL", prev_base)
+
+
 def _selftest_redact_before_chunk(check: Callable[[str, object], None]) -> None:
     print("\n=== Redact Before Chunk ===")
     token = "sk-" + "b" * 24
@@ -3542,6 +3734,9 @@ def _selftest_safe_edit_paths(check: Callable[[str, object], None]) -> None:
 
 
 def run_self_test() -> None:
+    global _JUDGE_ALLOWLIST_PATH, _SELFTEST_ALLOWLIST
+    import shutil
+
     results: list[bool] = []
 
     def check(desc: str, ok: object) -> None:
@@ -3555,6 +3750,8 @@ def run_self_test() -> None:
         "CODEX_REFLECTOR_ENABLED",
     )
     saved_env = {name: os.environ.get(name) for name in watched_env}
+    allow_dir = tempfile.mkdtemp()
+    _SELFTEST_ALLOWLIST = _JUDGE_ALLOWLIST_PATH = Path(allow_dir, "allowed-judge-urls")
     try:
         _selftest_plan_paths(check)
         _selftest_synthetic_paths(check)
@@ -3576,6 +3773,7 @@ def run_self_test() -> None:
         _selftest_transport_failures(check)
         _selftest_transport_bad_key(check)
         _selftest_transport_loopback_proxy(check)
+        _selftest_judge_base_url(check)
         _selftest_redact_before_chunk(check)
         _selftest_dispatch(check)
         _selftest_chunk_dispatch(check)
@@ -3587,6 +3785,8 @@ def run_self_test() -> None:
     finally:
         for name, value in saved_env.items():
             _restore_env(name, value)
+        _SELFTEST_ALLOWLIST = None
+        shutil.rmtree(allow_dir)
     passed = sum(1 for ok in results if ok)
     total = len(results)
     print(f"\n{passed}/{total} passed")
