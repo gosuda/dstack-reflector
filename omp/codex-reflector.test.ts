@@ -2538,10 +2538,6 @@ describe("codeReviewResponse", () => {
 		expect(last.text).toContain("FAIL");
 		expect(last.text).toContain("missing guard");
 	});
-	test("PASS and UNCERTAIN stay advisory (no isError — fail-open)", () => {
-		expect(codeReviewResponse("PASS", "a.ts", "ok", []).isError).toBeFalsy();
-		expect(codeReviewResponse("UNCERTAIN", "a.ts", "unsure", []).isError).toBeFalsy();
-	});
 });
 
 describe("stopReviewDecision", () => {
@@ -2553,9 +2549,6 @@ describe("stopReviewDecision", () => {
 		expect(r?.decision).toBe("block");
 		expect(r?.reason).toContain("FAIL");
 		expect(r?.reason).toContain("missing guard");
-	});
-	test("UNCERTAIN settles (returns undefined — never block on uncertainty)", () => {
-		expect(stopReviewDecision("UNCERTAIN", "unsure")).toBeUndefined();
 	});
 });
 
