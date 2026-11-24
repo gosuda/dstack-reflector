@@ -597,6 +597,21 @@ def _judge_endpoint(base: str) -> tuple[tuple[str, str, int], str]:
     except ValueError:
         raise _JudgeUrlRefused("TYPESAFE_BASE_URL is not a plain base URL") from None
     host = (parts.hostname or "").rstrip(".")
+    try:
+        ascii_host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        raise _JudgeUrlRefused("TYPESAFE_BASE_URL is not a plain base URL") from None
+    raw_labels = host.split(".")
+    ascii_labels = ascii_host.split(".")
+    if len(raw_labels) != len(ascii_labels):
+        raise _JudgeUrlRefused("TYPESAFE_BASE_URL is not a plain base URL") from None
+    for raw_label, ascii_label in zip(raw_labels, ascii_labels):
+        if raw_label != ascii_label and "xn--" not in ascii_label:
+            raise _JudgeUrlRefused("TYPESAFE_BASE_URL is not a plain base URL") from None
+    official_host = urllib.parse.urlsplit(_JUDGE_OFFICIAL_BASE_URL).hostname or ""
+    if ascii_host == official_host and host != official_host:
+        raise _JudgeUrlRefused("TYPESAFE_BASE_URL is not a plain base URL") from None
+    host = ascii_host
     if "@" in parts.netloc or parts.query or parts.fragment or not _is_judge_host(host):
         raise _JudgeUrlRefused("TYPESAFE_BASE_URL is not a plain base URL")
     loopback_http = parts.scheme == "http" and _is_loopback_host(host)
@@ -3629,6 +3644,13 @@ def _selftest_judge_base_url(check: Callable[[str, object], None]) -> None:
             "official host in another spelling is the official judge",
             outcome(" HTTPS://API.TypeSafe.ai./ ") == official,
         )
+        try:
+            unicode_origin = _judge_endpoint("https://münchen.de/")[0]
+            punycode_origin = _judge_endpoint("https://xn--mnchen-3ya.de/")[0]
+            idn_equivalent = unicode_origin == punycode_origin
+        except _JudgeUrlRefused:
+            idn_equivalent = False
+        check("unicode and punycode IDN map to one origin", idn_equivalent)
         for base in hostile:
             refusal = outcome(base)
             check(
