@@ -307,7 +307,7 @@ function utf8Length(text: string): number {
 	return total;
 }
 
-export function chunkText(text: string, limit = CHUNK_MAX_BYTES): string[] {
+export function chunkText(text: string, limit: number = CHUNK_MAX_BYTES): string[] {
 	if (limit < 4) throw new Error(`chunk limit must be at least 4, got ${limit}`);
 	const chunks: string[] = [];
 	let start = 0;
@@ -346,7 +346,7 @@ function scoreQuestion(subject: string, dimension: DimensionSpec): ScoreQuestion
 	};
 }
 
-export function buildQuestions(route: Route, file?: string, completenessJudged = true): Questions {
+export function buildQuestions(route: Route, file?: string, completenessJudged: boolean = true): Questions {
 	const questions: Questions = {};
 	const subject = SUBJECT_NOUN[route];
 	for (const dimension of DIMENSIONS) {
@@ -744,7 +744,7 @@ export interface HandlerDeadline {
 
 export function handlerDeadline(
 	upstream?: AbortSignal,
-	budgetMs = handlerBudgetMs,
+	budgetMs: number = handlerBudgetMs,
 ): HandlerDeadline {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), budgetMs);
