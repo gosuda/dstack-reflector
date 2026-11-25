@@ -159,8 +159,25 @@ Both surfaces read `CODEX_REFLECTOR_ENABLED` and `CODEX_REFLECTOR_DEBUG`. The `T
 | `CODEX_REFLECTOR_STOP_REVIEW` | `0` (OMP) | OMP only. Set to `1` to enable the opt-in Stop gate (`0` disables). The Python Stop gate is always on |
 | `CODEX_REFLECTOR_DEBUG` | `0` | Set to `1` for diagnostics: on stderr in the Python plugin, in the agent log on oh-my-pi |
 | `TYPESAFE_API_KEY` | _(none)_ | Python only. Required. Bearer token for the TypeSafe decision-model API |
-| `TYPESAFE_BASE_URL` | `https://api.typesafe.ai` | Python only. Judge API base URL |
+| `TYPESAFE_BASE_URL` | `https://api.typesafe.ai` | Python only. Judge API base URL. Any other host, loopback included, must be on the [judge allowlist](#judge-endpoint-allowlist) |
 | `TYPESAFE_DEFAULT_MODEL` | `jev-1.14.0` | Python only. Judge model id |
+
+### Judge endpoint allowlist
+
+The Python plugin sends `TYPESAFE_API_KEY` and the review text only to `https://api.typesafe.ai` unless you allow another endpoint. A project can set environment variables for the agent, so `TYPESAFE_BASE_URL` alone cannot move the key to another host. The allowlist does not cover the transport: the plugin still honors `HTTPS_PROXY` and the `SSL_CERT_FILE` and `SSL_CERT_DIR` variables, so an environment that names a proxy together with a CA certificate it controls can read the key on its way to the official host.
+
+To use another endpoint, add its base URL to `~/.config/codex-reflector/allowed-judge-urls`, one per line, then set `TYPESAFE_BASE_URL` to it:
+
+```
+# lines that start with # are comments
+https://judge.internal.example
+http://127.0.0.1:8080
+```
+
+- The plugin finds the file through the home directory of your account in the password database. It never reads `$HOME` or `$XDG_CONFIG_HOME` for it, so project settings cannot point it at another file. On a system without a password database (Windows), only the default endpoint is used.
+- An entry and `TYPESAFE_BASE_URL` match when the scheme, the host name, and the port are equal after parsing. The path can differ. A longer host name, a different port, or a host in the path does not match.
+- The base URL must be `https`, or `http` to a loopback host. It must not carry a user name, a password, a query, or a fragment.
+- A refused base URL skips the review with a notice that names the rule and the allowlist file. The notice does not repeat the URL or the key.
 
 ## How It Works
 
