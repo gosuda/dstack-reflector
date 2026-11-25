@@ -113,6 +113,9 @@ This file is only for repo-specific constraints that are easy to break and expen
 - **Rule:** Redact secrets before any state leaves the process: every state value passes through redaction before it is chunked, so a secret cannot survive split across two chunks. Untrusted tool and transcript data sits only in `state`, and instructions sit only in `questions`; NEVER move subject text into a question.
   **Why:** The reflector reviews arbitrary tool output, diffs, shell errors, and transcripts. The judge receives `state` verbatim, so an unredacted secret leaves the process, and subject text placed in a question becomes instructions.
 
+- **Rule:** The external judge is off by default: `invoke_judge` sends nothing unless `CODEX_REFLECTOR_JUDGE=1`, and the skip notice names the setting.
+  **Why:** Key presence alone must not exfiltrate session content; the notice teaches the opt-in instead of failing silently.
+
 - **Rule:** Confine attacker-influenced file paths to an allowlist before reading them and forwarding them to the judge: plan paths must pass `_validate_plan_path` (resolved under `~/.claude/plans/`, `.md` suffix, synthetic/traversal rejected); edit targets must pass `_is_safe_edit_path(file_path, cwd)` resolved against the hook-supplied `cwd`, never the reflector process cwd. Any new disk-read site must route through the validator.
   Plans live in the global `~/.claude/plans/`, never in `<project>/.claude/plans/`. An edit path passes only when it resolves under the hook `cwd` (the process cwd when the payload carries none) or under `~/.claude/plans/`; a resolve error rejects it.
   **Why:** `ExitPlanMode` `filePath` and edit `file_path` come from tool payloads an attacker can shape (`/etc/passwd`, `../../` traversal). Without the gate the reflector reads the file and ships it to the judge; resolving against the process cwd instead of the hook cwd silently breaks the confinement.

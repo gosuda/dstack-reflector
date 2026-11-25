@@ -6,12 +6,12 @@
 
 Independent critic and oracle for coding agents.
 
-The agent acts. A decision model judges changes, plans, stops, and risky commands. Code changes get a second opinion by default.
+The agent acts. A decision model judges changes, plans, stops, and risky commands. The external judge is opt-in and off by default: no session content leaves the machine until you enable it.
 
 ## Requirements
 
 - **oh-my-pi (omp)**: a working `judge` model role (`modelRoles.judge`). It answers the review questions.
-- **Claude Code plugin (Python)**: `TYPESAFE_API_KEY` in the environment. Python 3.8+, standard library only. The judge calls go to the TypeSafe decision-model API.
+- **Claude Code plugin (Python)**: `CODEX_REFLECTOR_JUDGE=1` and `TYPESAFE_API_KEY` in the environment. Python 3.8+, standard library only. The judge calls go to the TypeSafe decision-model API.
 
 The reflector ships in two surfaces; install whichever matches your agent:
 
@@ -22,7 +22,7 @@ The reflector ships in two surfaces; install whichever matches your agent:
 
 ## Claude Code plugin
 
-A single-file Python hook (`scripts/codex-reflector.py`, stdlib only) wired through `hooks/hooks.json`. Requires Python 3.8+ and `TYPESAFE_API_KEY` in the environment.
+A single-file Python hook (`scripts/codex-reflector.py`, stdlib only) wired through `hooks/hooks.json`. Requires Python 3.8+, `TYPESAFE_API_KEY` in the environment, and `CODEX_REFLECTOR_JUDGE=1`: the external judge is opt-in and off by default.
 
 ### Install
 
@@ -48,9 +48,9 @@ Place this plugin at `~/.claude/codex-reflector/` and restart Claude Code.
 
 | Event | Trigger | Mode | Purpose |
 |---|---|---|---|
-| PostToolUse | Write, Edit, Fast-Apply MCP edit | async | Decision-model scorecard review (PASS/FAIL/UNCERTAIN) |
-| PostToolUse | ExitPlanMode | async | Decision-model plan review, advisory (PASS/FAIL/UNCERTAIN) |
-| Stop | Agent finishing | sync | Fresh judge review; blocks on FAIL only (PASS/UNCERTAIN settle) |
+| PostToolUse | Write, Edit, Fast-Apply MCP edit | async | Decision-model scorecard review (PASS/FAIL/UNCERTAIN), when the judge is enabled |
+| PostToolUse | ExitPlanMode | async | Decision-model plan review, advisory (PASS/FAIL/UNCERTAIN), when the judge is enabled |
+| Stop | Agent finishing | sync | Fresh judge review when the judge is enabled; blocks on FAIL only (PASS/UNCERTAIN settle) |
 
 ### Use with Cursor
 
@@ -136,7 +136,7 @@ Reads the shared [environment variables](#environment-variables). The `TYPESAFE_
 
 Run the unit tests with `bun test omp/codex-reflector.test.ts`.
 
-**Behavioral delta from the Claude plugin:** both surfaces are stateless. Scorecard reviews inject their verdict inline every time. On OMP, the pre-execution bash guard (`tool_call`) and the Stop gate (`session_stop`) are opt-in and disabled by default; you can toggle them via extension flags (`codex-bash-guard`, `codex-stop-review`) in `/settings` or enable them via env vars (`CODEX_REFLECTOR_BASH_GUARD=1`, `CODEX_REFLECTOR_STOP_REVIEW=1`). The Python Stop gate is always on, and Python has no bash guard. When active, the Stop gate runs a fresh judge review on the native `session_stop` event: only a FAIL blocks (the worst defect probability at 0.9 or above); PASS and UNCERTAIN settle (fail-open, never block on uncertainty). It runs once per stop chain: a FAIL returns `{ decision: "block", reason }` so the agent keeps working with that context, then the harness `stop_hook_active` flag settles the re-stop; the native 8-continuation cap is the backstop.
+**Behavioral delta from the Claude plugin:** both surfaces are stateless. Scorecard reviews inject their verdict inline every time. On OMP, the pre-execution bash guard (`tool_call`) and the Stop gate (`session_stop`) are opt-in and disabled by default; you can toggle them via extension flags (`codex-bash-guard`, `codex-stop-review`) in `/settings` or enable them via env vars (`CODEX_REFLECTOR_BASH_GUARD=1`, `CODEX_REFLECTOR_STOP_REVIEW=1`). The Python judge on all three routes runs only when the external judge is enabled (`CODEX_REFLECTOR_JUDGE=1`), and Python has no bash guard. When active, the Stop gate runs a fresh judge review on the native `session_stop` event: only a FAIL blocks (the worst defect probability at 0.9 or above); PASS and UNCERTAIN settle (fail-open, never block on uncertainty). It runs once per stop chain: a FAIL returns `{ decision: "block", reason }` so the agent keeps working with that context, then the harness `stop_hook_active` flag settles the re-stop; the native 8-continuation cap is the backstop.
 
 ### Hook events
 
@@ -150,34 +150,35 @@ Run the unit tests with `bun test omp/codex-reflector.test.ts`.
 
 ## Environment Variables
 
-Both surfaces read `CODEX_REFLECTOR_ENABLED` and `CODEX_REFLECTOR_DEBUG`. The `TYPESAFE_*` variables are Python-only. The two gate variables are OMP-only: the Python Stop gate is always on, and Python has no bash guard.
+Both surfaces read `CODEX_REFLECTOR_ENABLED` and `CODEX_REFLECTOR_DEBUG`. The `TYPESAFE_*` variables and `CODEX_REFLECTOR_JUDGE` are Python-only. The two gate variables are OMP-only, and Python has no bash guard.
 
 | Variable | Default | Description |
 |---|---|---|
 | `CODEX_REFLECTOR_ENABLED` | `1` | Set to `0` to disable all hooks (both surfaces) |
 | `CODEX_REFLECTOR_BASH_GUARD` | `0` | OMP only. Set to `1` to enable the opt-in pre-execution bash guard (`0` disables). Python has no bash guard |
-| `CODEX_REFLECTOR_STOP_REVIEW` | `0` (OMP) | OMP only. Set to `1` to enable the opt-in Stop gate (`0` disables). The Python Stop gate is always on |
+| `CODEX_REFLECTOR_STOP_REVIEW` | `0` (OMP) | OMP only. Set to `1` to enable the opt-in Stop gate (`0` disables). Python has no separate Stop flag: its Stop gate runs whenever the judge is enabled |
 | `CODEX_REFLECTOR_DEBUG` | `0` | Set to `1` for diagnostics: on stderr in the Python plugin, in the agent log on oh-my-pi |
-| `TYPESAFE_API_KEY` | _(none)_ | Python only. Required. Bearer token for the TypeSafe decision-model API |
+| `CODEX_REFLECTOR_JUDGE` | `0` | Python only. Set to `1` to let session content leave the machine for the external judge. When unset, every route is handled locally with a `review skipped` notice |
+| `TYPESAFE_API_KEY` | _(none)_ | Python only. Required together with `CODEX_REFLECTOR_JUDGE=1`. Bearer token for the TypeSafe decision-model API |
 | `TYPESAFE_BASE_URL` | `https://api.typesafe.ai` | Python only. Judge API base URL |
 | `TYPESAFE_DEFAULT_MODEL` | `jev-1.14.0` | Python only. Judge model id |
 
 ## How It Works
 
-Both surfaces keep no FAIL state: reviews inject their verdict and scorecard inline, and the Stop gate runs a fresh review rather than consulting persisted state. Every route asks the decision model. The implementation specifics below (exit-code blocking) describe the Python plugin; the omp port mirrors the behavior with the [delta noted above](#behavior).
+Both surfaces keep no FAIL state: reviews inject their verdict and scorecard inline, and the Stop gate runs a fresh review rather than consulting persisted state. Every route asks the decision model once the external judge is enabled; otherwise the route is handled locally with a `review skipped` notice that names the opt-in setting. The implementation specifics below (exit-code blocking) describe the Python plugin; the omp port mirrors the behavior with the [delta noted above](#behavior).
 
 | Route | Reviews it | Outcome |
 |---|---|---|
 | Write review (Write/Edit tool calls) | Decision model | Scorecard with PASS/FAIL/UNCERTAIN, advisory |
 | Plan review (Python only) | Decision model | Scorecard, advisory |
-| Stop gate (Python always on, OMP opt-in) | Decision model | Scorecard, blocks on FAIL |
+| Stop gate (Python when enabled, OMP opt-in) | Decision model | Scorecard, blocks on FAIL |
 | Bash guard (OMP only, opt-in) | Decision model | Five yes/no answers, blocks at 0.9 |
 
-If the judge does not answer, the route proceeds unreviewed and shows `review skipped: <cause>`. It never blocks.
+If the judge does not answer, the route proceeds unreviewed and shows `review skipped: <cause>`. It never blocks. When the judge is not enabled, no network call is made.
 
 ### Code Reviews (async)
 
-After Write/Edit tool calls, the decision model judges the change. It answers scored questions on seven dimensions: correctness, completeness against the stated job, complexity, slop, concurrency, performance, and design. UI files (`.html`, `.htm`, `.css`, `.scss`, `.sass`, `.less`, `.jsx`, `.tsx`, `.vue`, `.svelte`, `.astro`) add layout, animation, and accessibility. The answers become a scorecard, and the reflector injects it inline so the agent sees it on the next turn.
+Once the judge is enabled, after Write/Edit tool calls the decision model judges the change. It answers scored questions on seven dimensions: correctness, completeness against the stated job, complexity, slop, concurrency, performance, and design. UI files (`.html`, `.htm`, `.css`, `.scss`, `.sass`, `.less`, `.jsx`, `.tsx`, `.vue`, `.svelte`, `.astro`) add layout, animation, and accessibility. The answers become a scorecard, and the reflector injects it inline so the agent sees it on the next turn.
 
 The verdict is computed in code from the judge's probabilities:
 
@@ -236,6 +237,7 @@ The Stop gate does not see your request, only the last answer of the agent.
 
 - **Fail-open**: an internal error or a missing judge answer never blocks the agent. The route proceeds unreviewed with the `review skipped: <cause>` notice; the Python plugin exits `0`, the omp hook returns without a block.
 - **Redaction**: secrets are redacted before any text leaves the process, on the judge path.
+- **Opt-in judge**: the external judge is off by default. With `CODEX_REFLECTOR_JUDGE` unset, no session content leaves the machine; the route is handled locally and the notice names the setting.
 - **Loop prevention**: both surfaces check the `stop_hook_active` flag to run the Stop review once per stop chain, with oh-my-pi's built-in 8-continuation cap as the omp backstop.
 
 ## License

@@ -63,6 +63,16 @@ _JUDGE_MAX_IN_FLIGHT = 8
 _JUDGE_REVIEW_DEADLINE_SECS = 90.0
 _JUDGE_RANDOM = random.random
 
+_JUDGE_OPT_IN_ENV = "CODEX_REFLECTOR_JUDGE"
+_JUDGE_OPT_IN_CAUSE = (
+    "external judge is not enabled (set CODEX_REFLECTOR_JUDGE=1 to enable it)"
+)
+
+
+def _judge_opted_in() -> bool:
+    return os.environ.get(_JUDGE_OPT_IN_ENV, "0") == "1"
+
+
 _ROUTE_SUBJECTS = {
     "write": "code change",
     "plan": "implementation plan",
@@ -854,6 +864,8 @@ def invoke_judge(
     questions: dict[str, Question],
     review: _Review | None = None,
 ) -> tuple[dict[str, Answer] | None, str]:
+    if not _judge_opted_in():
+        return None, _JUDGE_OPT_IN_CAUSE
     key = os.environ.get("TYPESAFE_API_KEY", "")
     if not key:
         return None, "TYPESAFE_API_KEY is not set"
@@ -3530,6 +3542,49 @@ def _selftest_redact_before_chunk(check: Callable[[str, object], None]) -> None:
         _restore_env("CODEX_REFLECTOR_ENABLED", prev_enabled)
 
 
+def _selftest_judge_opt_in(check: Callable[[str, object], None]) -> None:
+    print("\n=== Judge Opt-In ===")
+    token = "sk-" + "d" * 24
+    prev_flag = os.environ.get("CODEX_REFLECTOR_JUDGE")
+    prev_key = os.environ.get("TYPESAFE_API_KEY")
+    prev_base = os.environ.get("TYPESAFE_BASE_URL")
+    prev_enabled = os.environ.get("CODEX_REFLECTOR_ENABLED")
+    os.environ["TYPESAFE_API_KEY"] = "test-key-1234"
+    os.environ.pop("CODEX_REFLECTOR_ENABLED", None)
+    try:
+        ok_reply = _scripted_replies([(200, _answers_reply({}, "jev-test"), {})])
+        with _RecordedJudgeServer(ok_reply) as judge:
+            os.environ["TYPESAFE_BASE_URL"] = judge.base_url
+            os.environ.pop("CODEX_REFLECTOR_JUDGE", None)
+            code, out, _ = _dispatch_hook_payload(_write_change_hook("value = 1\n"))
+            notice = _parsed_hook_output(out).get("systemMessage", "")
+            check(
+                "judge opt-in unset makes no judge call and names the setting",
+                (code, len(judge.records), "CODEX_REFLECTOR_JUDGE=1" in str(notice))
+                == (0, 0, True),
+            )
+            os.environ["CODEX_REFLECTOR_JUDGE"] = "1"
+            code, _, _ = _dispatch_hook_payload(
+                _write_change_hook('API_KEY = "%s"\n' % token)
+            )
+            sent = judge.records[0]["body"] if judge.records else b""
+            check(
+                "judge opt-in set calls the judge after redaction",
+                (
+                    code,
+                    len(judge.records),
+                    token.encode() in sent,
+                    b"[REDACTED]" in sent,
+                )
+                == (0, 1, False, True),
+            )
+    finally:
+        _restore_env("TYPESAFE_API_KEY", prev_key)
+        _restore_env("TYPESAFE_BASE_URL", prev_base)
+        _restore_env("CODEX_REFLECTOR_ENABLED", prev_enabled)
+        _restore_env("CODEX_REFLECTOR_JUDGE", prev_flag)
+
+
 def _selftest_safe_edit_paths(check: Callable[[str, object], None]) -> None:
     print("\n=== Safe Edit Paths ===")
     cwd = os.getcwd()
@@ -3553,9 +3608,14 @@ def run_self_test() -> None:
         "TYPESAFE_API_KEY",
         "TYPESAFE_DEFAULT_MODEL",
         "CODEX_REFLECTOR_ENABLED",
+        "CODEX_REFLECTOR_JUDGE",
     )
     saved_env = {name: os.environ.get(name) for name in watched_env}
     try:
+        # The recorded-judge self-tests drive the fake judge server
+        # directly, so they opt in explicitly. The opt-in self-test
+        # manages the flag itself to prove the unset default is silent.
+        os.environ["CODEX_REFLECTOR_JUDGE"] = "1"
         _selftest_plan_paths(check)
         _selftest_synthetic_paths(check)
         _selftest_fast_apply(check)
@@ -3584,6 +3644,7 @@ def run_self_test() -> None:
         _selftest_review_refusal(check)
         _selftest_chunk_routes(check)
         _selftest_secrets(check)
+        _selftest_judge_opt_in(check)
     finally:
         for name, value in saved_env.items():
             _restore_env(name, value)
