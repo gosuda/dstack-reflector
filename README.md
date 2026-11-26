@@ -66,13 +66,8 @@ To install it as a local Cursor plugin, copy or symlink this repository into:
 ~/.cursor/plugins/local/codex-reflector
 ```
 
-Then reload Cursor. The plugin components are auto-discovered from this repository:
-
-- `hooks/hooks.json`
-- `rules/codex-reflector-usage.mdc`
-- `skills/codex-reflector/SKILL.md`
-- `agents/codex-reflector-reviewer.md`
-- `commands/install-cursor-plugin.md`
+Then reload Cursor. The plugin entry point is `hooks/hooks.json`, the only
+component Cursor auto-discovers from this repository.
 
 #### Direct-export hooks
 
@@ -88,8 +83,6 @@ That writes `~/.claude/settings.json` with absolute paths to this checkout. To i
 ```bash
 scripts/install-cursor.sh /path/to/project
 ```
-
-When this repository itself is opened in Cursor, the checked-in `.claude/settings.json` also works directly because Cursor provides `CLAUDE_PROJECT_DIR`.
 
 Cursor compatibility notes:
 
